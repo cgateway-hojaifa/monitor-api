@@ -1,3 +1,4 @@
+import { In } from "typeorm";
 import { AppDataSource } from "@/config/data-source";
 import { Project } from "@/entities/Project";
 import { FileRecord } from "@/entities/FileRecord";
@@ -53,8 +54,14 @@ export async function updateProject(id: number, body: { name?: string; descripti
 export async function deleteProject(id: number) {
   const project = await projectRepo().findOne({ where: { id } });
   if (!project) throw new ApiError(httpStatus.NOT_FOUND, "Project not found.");
-  await fileRepo().delete({ project_id: project.id });
-  await projectRepo().remove(project);
+  // No FK cascade (plain FK columns): remove the project's files' check history, the files, then
+  // the project — in one transaction so a failure can't leave orphans behind.
+  await AppDataSource.transaction(async (m) => {
+    const files = await m.find(FileRecord, { where: { project_id: project.id }, select: ["id"] });
+    if (files.length > 0) await m.delete(CheckHistory, { file_id: In(files.map((f) => f.id)) });
+    await m.delete(FileRecord, { project_id: project.id });
+    await m.remove(project);
+  });
 }
 
 // ── Files ──────────────────────────────────────────────────────────────────
@@ -126,8 +133,11 @@ export async function updateFile(
 export async function deleteFile(id: number) {
   const file = await fileRepo().findOne({ where: { id } });
   if (!file) throw new ApiError(httpStatus.NOT_FOUND, "File not found.");
-  await historyRepo().delete({ file_id: file.id });
-  await fileRepo().remove(file);
+  // No FK cascade (plain FK column): drop history + file together or not at all.
+  await AppDataSource.transaction(async (m) => {
+    await m.delete(CheckHistory, { file_id: file.id });
+    await m.remove(file);
+  });
 }
 
 /** POST /files/check — run a single file's check. Returns the runner outcome (422 on fetch error). */

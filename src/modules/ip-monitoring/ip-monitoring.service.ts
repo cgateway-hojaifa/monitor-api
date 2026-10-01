@@ -235,8 +235,11 @@ export async function updateMonitor(id: number, b: any) {
 export async function deleteMonitor(id: number) {
   const monitor = await monitorRepo().findOne({ where: { id } });
   if (!monitor) throw new ApiError(httpStatus.NOT_FOUND, "Monitor not found.");
-  await heartbeatRepo().delete({ monitor_id: monitor.id });
-  await monitorRepo().remove(monitor);
+  // No FK cascade (plain FK column): drop heartbeats + monitor together or not at all.
+  await AppDataSource.transaction(async (m) => {
+    await m.delete(IpHeartbeat, { monitor_id: monitor.id });
+    await m.remove(monitor);
+  });
 }
 
 // ── Heartbeats ────────────────────────────────────────────────────────────────

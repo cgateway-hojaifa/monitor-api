@@ -4,24 +4,56 @@ import type { RequestSchema } from "@/middleware/validate";
 /**
  * Joi request schemas for the Cron Monitoring routes.
  *
- * House style: enforce hard requirements here (name/expected present, numeric id) and let the
- * service normalize the rest. The ingest body is loose on purpose — `start_time`/`end_time` are
- * optional and `data` is opaque JSON — so its checks live in the service.
+ * Monitor `name` / `expected_per_day` are checked and normalized here only — the normalizers run as
+ * Joi rules and their output replaces the body value, so the service receives a trimmed name and an
+ * integer count and does not re-check them. The ingest body is loose on purpose — `data` is opaque
+ * JSON — so its range checks live in the service.
  */
+
+// ── Normalizers ────────────────────────────────────────────────────────────────
+
+function normalizeName(raw: unknown): string {
+  const value = typeof raw === "string" ? raw.trim() : "";
+  if (!value) throw new Error("Name is required.");
+  if (value.length > 150) throw new Error("Name must be 150 characters or fewer.");
+  return value;
+}
+
+function normalizeExpected(raw: unknown): number {
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1)
+    throw new Error("Expected runs per day must be a positive integer.");
+  return n;
+}
+
+/**
+ * Run a normalizer as a Joi rule: its return value replaces the input, a thrown message becomes the
+ * validation error. Joi skips custom rules for `undefined`, so absence is handled by `.required()`.
+ */
+const normalized = (fn: (raw: unknown) => unknown) =>
+  Joi.any().custom((value, helpers) => {
+    try {
+      return fn(value);
+    } catch (err) {
+      return helpers.message({ custom: (err as Error).message });
+    }
+  });
 
 const idParam = Joi.object({
   id: Joi.number().integer().positive().required(),
 });
 
 const monitorBody = Joi.object({
-  name: Joi.string().trim().max(150).required(),
-  expected_per_day: Joi.alternatives(Joi.number(), Joi.string()).required(),
+  name: normalized(normalizeName).required().messages({ "any.required": "Name is required." }),
+  expected_per_day: normalized(normalizeExpected)
+    .required()
+    .messages({ "any.required": "Expected runs per day is required." }),
   active: Joi.boolean().optional(),
 });
 
 const updateBody = Joi.object({
-  name: Joi.string().trim().max(150).optional(),
-  expected_per_day: Joi.alternatives(Joi.number(), Joi.string()).optional(),
+  name: normalized(normalizeName).optional(),
+  expected_per_day: normalized(normalizeExpected).optional(),
   active: Joi.boolean().optional(),
 });
 

@@ -63,6 +63,6 @@ export async function initDataSource(): Promise<DataSource> {
   if (initialized) return AppDataSource;
   await AppDataSource.initialize();
   initialized = true;
-  logger.info("TypeORM DataSource initialized.");
+  logger.info("DataSource initialized.");
   return AppDataSource;
 }

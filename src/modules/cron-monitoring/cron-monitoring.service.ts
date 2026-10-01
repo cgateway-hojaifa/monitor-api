@@ -23,31 +23,12 @@ const resultRepo = () => AppDataSource.getRepository(CronDailyResult);
 
 const MAX_DATA_BYTES = 16 * 1024;
 
-// ── Normalizers ────────────────────────────────────────────────────────────────
-
-function normalizeName(raw: unknown): string {
-  const value = typeof raw === "string" ? raw.trim() : "";
-  if (!value) throw new ApiError(httpStatus.BAD_REQUEST, "Name is required.");
-  if (value.length > 150)
-    throw new ApiError(httpStatus.BAD_REQUEST, "Name must be 150 characters or fewer.");
-  return value;
-}
-
-function normalizeExpected(raw: unknown): number {
-  const n = Number(raw);
-  if (!Number.isInteger(n) || n < 1)
-    throw new ApiError(httpStatus.BAD_REQUEST, "Expected runs per day must be a positive integer.");
-  return n;
-}
-
-/** A URL-safe, 48-hex-char (24-byte) key. Retried on the astronomically unlikely unique clash. */
-async function generateUniqueKey(): Promise<string> {
-  for (let i = 0; i < 5; i++) {
-    const key = crypto.randomBytes(24).toString("hex");
-    const clash = await monitorRepo().findOne({ where: { cron_key: key } });
-    if (!clash) return key;
-  }
-  throw new ApiError(httpStatus.INTERNAL_SERVER_ERROR, "Could not generate a unique key.");
+/**
+ * A URL-safe, 48-hex-char (24-byte) key. 192 random bits make a clash practically impossible, so
+ * there is no pre-check; the `cron_monitor_cron_key` unique index is the guard (ER_DUP_ENTRY → 409).
+ */
+function generateKey(): string {
+  return crypto.randomBytes(24).toString("hex");
 }
 
 /** Parse a required ISO-ish datetime from the ingest body. Throws on empty/absent/garbage. */
@@ -145,39 +126,47 @@ export async function getMonitor(id: number) {
   return toPublic(await getEntity(id));
 }
 
-export async function createMonitor(body: Record<string, unknown>) {
-  const name = normalizeName(body.name);
-  const expected_per_day = normalizeExpected(body.expected_per_day);
-  const active = body.active === undefined ? true : Boolean(body.active);
-  const cron_key = await generateUniqueKey();
+/** Monitor body as delivered by the route validator: name trimmed, expected_per_day an integer ≥ 1. */
+export interface MonitorBody {
+  name: string;
+  expected_per_day: number;
+  active?: boolean;
+}
+
+export async function createMonitor(body: MonitorBody) {
+  const { name, expected_per_day } = body;
+  const active = body.active ?? true;
+  const cron_key = generateKey();
 
   const monitor = monitorRepo().create({ name, expected_per_day, active, cron_key });
   await monitorRepo().save(monitor);
   return toPublic(monitor);
 }
 
-export async function updateMonitor(id: number, body: Record<string, unknown>) {
+export async function updateMonitor(id: number, body: Partial<MonitorBody>) {
   const monitor = await getEntity(id);
-  if (body.name !== undefined) monitor.name = normalizeName(body.name);
-  if (body.expected_per_day !== undefined)
-    monitor.expected_per_day = normalizeExpected(body.expected_per_day);
-  if (body.active !== undefined) monitor.active = Boolean(body.active);
+  if (body.name !== undefined) monitor.name = body.name;
+  if (body.expected_per_day !== undefined) monitor.expected_per_day = body.expected_per_day;
+  if (body.active !== undefined) monitor.active = body.active;
   await monitorRepo().save(monitor);
   return toPublic(monitor);
 }
 
 export async function deleteMonitor(id: number) {
   const monitor = await getEntity(id);
-  // Clear the ledger + audit rows first (no FK cascade defined; keep the tables consistent).
-  await runRepo().delete({ monitor_id: id });
-  await resultRepo().delete({ monitor_id: id });
-  await monitorRepo().remove(monitor);
+  // No FK cascade (plain FK columns), so clear the ledger + audit rows ourselves — in one
+  // transaction so a failure part-way can't leave a monitor without its history, or vice versa.
+  await AppDataSource.transaction(async (m) => {
+    await m.delete(CronRun, { monitor_id: id });
+    await m.delete(CronDailyResult, { monitor_id: id });
+    await m.remove(monitor);
+  });
 }
 
 /** Rotate the shared secret. Old key stops working immediately. */
 export async function regenerateKey(id: number) {
   const monitor = await getEntity(id);
-  monitor.cron_key = await generateUniqueKey();
+  monitor.cron_key = generateKey();
   await monitorRepo().save(monitor);
   return toPublic(monitor);
 }

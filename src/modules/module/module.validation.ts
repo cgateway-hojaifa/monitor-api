@@ -26,10 +26,6 @@ const moduleBody = Joi.object({
   parent_id: Joi.number().integer().positive().allow(null).optional(),
   status: Joi.string().valid("active", "inactive").optional(),
   visible: Joi.boolean().optional(),
-  permissions: Joi.array().items(Joi.string()).optional(),
-  config: Joi.object().optional(),
-  feature_flags: Joi.object().pattern(Joi.string(), Joi.boolean()).optional(),
-  dependencies: Joi.array().items(Joi.string()).optional(),
 });
 
 export const listModules: RequestSchema = {};
@@ -40,3 +36,11 @@ export const getModule: RequestSchema = { params: idParam };
 export const createModule: RequestSchema = { body: moduleBody };
 export const updateModule: RequestSchema = { params: idParam, body: moduleBody };
 export const deleteModule: RequestSchema = { params: idParam };
+export const reorderModules: RequestSchema = {
+  body: Joi.object({
+    // The sibling group being reordered: its parent's id, or null for the top level.
+    parent_id: Joi.number().integer().positive().allow(null).required(),
+    // Every sibling id in that group, in the new order.
+    ids: Joi.array().items(Joi.number().integer().positive()).min(1).required(),
+  }),
+};

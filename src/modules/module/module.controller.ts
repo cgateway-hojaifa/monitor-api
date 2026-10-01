@@ -2,7 +2,6 @@ import type { Request, Response } from "express";
 import httpStatus from "@/constants/httpStatus";
 import catchAsync from "@/middleware/catchAsync";
 import * as service from "@/modules/module/module.service";
-import { userHasPermission } from "@/shared/permissions";
 import { invalidateModuleCache } from "@/middleware/moduleGuard";
 
 // ── Admin CRUD ──
@@ -28,6 +27,11 @@ export const updateModule = catchAsync(async (req: Request, res: Response) => {
   res.status(httpStatus.OK).json({ success: true, data });
 });
 
+export const reorderModules = catchAsync(async (req: Request, res: Response) => {
+  await service.reorderModules(req.body.parent_id, req.body.ids);
+  res.status(httpStatus.OK).json({ success: true, message: "Order saved." });
+});
+
 export const deleteModule = catchAsync(async (req: Request, res: Response) => {
   await service.deleteModule(Number(req.params.id));
   invalidateModuleCache();
@@ -47,8 +51,7 @@ export const getModuleSchedules = catchAsync(async (_req: Request, res: Response
 });
 
 // ── Navigation (sidebar) ──
-export const getNav = catchAsync(async (req: Request, res: Response) => {
-  // Permission filter: a module is shown only if the caller has all of its required permissions.
-  const data = await service.buildNavTree((m) => userHasPermission(req, m.permissions));
+export const getNav = catchAsync(async (_req: Request, res: Response) => {
+  const data = await service.buildNavTree();
   res.status(httpStatus.OK).json({ success: true, data });
 });

@@ -162,10 +162,6 @@ export async function seedModules(): Promise<void> {
       parent_id: parentId,
       status: "active",
       visible: s.visible ?? true,
-      permissions: [],
-      config: {},
-      feature_flags: {},
-      dependencies: [],
     });
     const saved = await repo.save(row);
     bySlug.set(saved.slug, saved);

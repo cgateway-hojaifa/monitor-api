@@ -1,4 +1,4 @@
-import { Not } from "typeorm";
+import { IsNull } from "typeorm";
 import { AppDataSource } from "@/config/data-source";
 import { Module } from "@/entities/Module";
 import ApiError from "@/utils/ApiError";
@@ -24,10 +24,6 @@ export interface ModulePayload {
   parent_id?: number | null;
   status?: "active" | "inactive";
   visible?: boolean;
-  permissions?: string[];
-  config?: Record<string, unknown>;
-  feature_flags?: Record<string, boolean>;
-  dependencies?: string[];
 }
 
 export interface NavNode {
@@ -57,10 +53,6 @@ function applyDefaults(body: ModulePayload): Partial<Module> {
     parent_id: body.parent_id ?? null,
     status: body.status ?? "active",
     visible: body.visible ?? true,
-    permissions: body.permissions ?? [],
-    config: body.config ?? {},
-    feature_flags: body.feature_flags ?? {},
-    dependencies: body.dependencies ?? [],
   };
 }
 
@@ -127,14 +119,14 @@ async function deriveRoute(
   return `${base}/${leaf}`;
 }
 
-/** Validate every dependency slug refers to an existing module. */
-async function assertDepsOk(deps: string[] | undefined) {
-  if (!deps || deps.length === 0) return;
-  const existing = await repo().find();
-  const slugs = new Set(existing.map((m) => m.slug));
-  const missing = deps.filter((d) => !slugs.has(d));
-  if (missing.length > 0)
-    throw new ApiError(httpStatus.BAD_REQUEST, `Unknown dependency: ${missing.join(", ")}`);
+/** One past the highest `menu_order` among the children of `parentId` (roots when null). */
+async function nextMenuOrder(parentId: number | null): Promise<number> {
+  const row = await repo()
+    .createQueryBuilder("m")
+    .select("MAX(m.menu_order)", "max")
+    .where(parentId === null ? "m.parent_id IS NULL" : "m.parent_id = :parentId", { parentId })
+    .getRawOne<{ max: number | null }>();
+  return Number(row?.max ?? 0) + 1;
 }
 
 // ── CRUD ─────────────────────────────────────────────────────────────────────
@@ -153,10 +145,12 @@ export async function getModule(id: number) {
 export async function createModule(body: ModulePayload) {
   await assertSlugOk(body.slug);
   await assertParentOk(body.parent_id);
-  await assertDepsOk(body.dependencies);
   const fields = applyDefaults(body);
   // Route follows the parent hierarchy (roots first, then children under them).
   fields.route = await deriveRoute(body, body.parent_id ?? null);
+  // No explicit order → append to the end of its sibling group (order is otherwise set by drag).
+  if (body.menu_order === undefined)
+    fields.menu_order = await nextMenuOrder(body.parent_id ?? null);
   const row = repo().create(fields);
   return repo().save(row);
 }
@@ -166,7 +160,6 @@ export async function updateModule(id: number, body: ModulePayload) {
   if (!row) throw new ApiError(httpStatus.NOT_FOUND, "Module not found.");
   await assertSlugOk(body.slug, id);
   await assertParentOk(body.parent_id, id);
-  await assertDepsOk(body.dependencies);
   const fields = applyDefaults(body);
   // Route is derived from the parent chain only at creation. On update the caller's route wins
   // verbatim (including null), so an edited route is never recomputed away.
@@ -174,13 +167,36 @@ export async function updateModule(id: number, body: ModulePayload) {
   // Fields the admin form doesn't submit keep their stored value rather than being reset to the
   // `applyDefaults` empty default, so an edit can't silently wipe them.
   if (body.description === undefined) fields.description = row.description;
-  if (body.permissions === undefined) fields.permissions = row.permissions;
-  if (body.config === undefined) fields.config = row.config;
-  if (body.feature_flags === undefined) fields.feature_flags = row.feature_flags;
-  if (body.dependencies === undefined) fields.dependencies = row.dependencies;
+  // Order is changed by drag-and-drop (reorderModules), not by the edit form.
+  if (body.menu_order === undefined) fields.menu_order = row.menu_order;
 
   Object.assign(row, fields);
   return repo().save(row);
+}
+
+/**
+ * Reorder one sibling group (the children of `parentId`, or the roots when null) by rewriting
+ * `menu_order` to 1..n in the given order. `ids` must be exactly that group — a stale list (a
+ * sibling added/removed/moved since the client loaded) is rejected rather than half-applied.
+ */
+export async function reorderModules(parentId: number | null, ids: number[]) {
+  const siblings = await repo().find({
+    where: { parent_id: parentId === null ? IsNull() : parentId },
+  });
+  const siblingIds = new Set(siblings.map((m) => m.id));
+  if (
+    new Set(ids).size !== ids.length ||
+    ids.length !== siblingIds.size ||
+    !ids.every((id) => siblingIds.has(id))
+  )
+    throw new ApiError(
+      httpStatus.CONFLICT,
+      "The module list changed since it was loaded. Reload and try again.",
+    );
+
+  await AppDataSource.transaction(async (m) => {
+    for (const [i, id] of ids.entries()) await m.update(Module, { id }, { menu_order: i + 1 });
+  });
 }
 
 export async function deleteModule(id: number) {
@@ -191,14 +207,6 @@ export async function deleteModule(id: number) {
   if (children > 0)
     throw new ApiError(httpStatus.BAD_REQUEST, "Remove or reassign child modules first.");
 
-  const dependents = await repo().find({ where: { id: Not(id) } });
-  const blocking = dependents.filter((m) => m.dependencies.includes(row.slug));
-  if (blocking.length > 0)
-    throw new ApiError(
-      httpStatus.BAD_REQUEST,
-      `Other modules depend on "${row.slug}": ${blocking.map((m) => m.slug).join(", ")}`,
-    );
-
   await repo().remove(row);
 }
 
@@ -206,14 +214,11 @@ export async function deleteModule(id: number) {
 
 /**
  * Build the navigation tree for the sidebar: active + visible modules only, ordered by
- * menu_order, nested under their parents. `allowed` is the set of module ids the caller may see
- * (permission-filtered by the controller). A parent is included if it (and its perms) pass; an
+ * menu_order, nested under their parents. A child whose parent is filtered out is dropped, and an
  * empty section (parent with no visible children and no route of its own) is dropped.
  */
-export async function buildNavTree(allowed: (m: Module) => boolean): Promise<NavNode[]> {
-  const rows = (await repo().find()).filter(
-    (m) => m.status === "active" && m.visible && allowed(m),
-  );
+export async function buildNavTree(): Promise<NavNode[]> {
+  const rows = (await repo().find()).filter((m) => m.status === "active" && m.visible);
 
   const toNode = (m: Module): NavNode => ({
     id: m.id,

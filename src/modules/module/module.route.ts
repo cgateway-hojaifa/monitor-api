@@ -5,10 +5,11 @@ import validate from "@/middleware/validate";
 
 const router = Router();
 
-// Mounted at /api/modules. Fixed sub-paths (/nav, /scopes) before "/:id".
+// Mounted at /api/modules. Fixed sub-paths (/nav, /scopes, /reorder) before "/:id".
 router.get("/nav", validate(schema.getNav), moduleController.getNav);
 router.get("/scopes", validate(schema.getModuleScopes), moduleController.getModuleScopes);
 router.get("/schedules", validate(schema.getModuleSchedules), moduleController.getModuleSchedules);
+router.put("/reorder", validate(schema.reorderModules), moduleController.reorderModules);
 
 router.get("/", validate(schema.listModules), moduleController.listModules);
 router.post("/", validate(schema.createModule), moduleController.createModule);

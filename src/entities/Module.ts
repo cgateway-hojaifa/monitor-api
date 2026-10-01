@@ -14,7 +14,7 @@ export type ModuleStatus = "active" | "inactive";
  *
  * A self-referencing tree (`parent_id`): a parent with `route = null` is a nav *section*; its
  * children are the nav links. Everything here is metadata (nav, ordering, nesting, visibility,
- * status, permissions, config, flags, deps) — the module's actual behavior (scheduled jobs, API
+ * status) — the module's actual behavior (scheduled jobs, API
  * handlers, React pages) is code, mapped to this row by `slug`.
  *
  * Following the codebase convention, `parent_id` is a plain FK column (not a TypeORM relation).
@@ -62,22 +62,6 @@ export class Module {
   /** Shown in navigation. `false` = module runs but is hidden from the sidebar. */
   @Column({ type: "boolean", default: true })
   visible!: boolean;
-
-  /** Permission slugs required to see/use this module. Empty = open to any authenticated user. */
-  @Column({ type: "json" })
-  permissions!: string[];
-
-  /** Arbitrary per-module configuration. */
-  @Column({ type: "json" })
-  config!: Record<string, unknown>;
-
-  /** Feature flags: `{ flagName: boolean }`. */
-  @Column({ type: "json" })
-  feature_flags!: Record<string, boolean>;
-
-  /** Slugs of modules that must be active for this one to function. */
-  @Column({ type: "json" })
-  dependencies!: string[];
 
   @CreateDateColumn({ type: "datetime", name: "created_at" })
   created_at!: Date;
