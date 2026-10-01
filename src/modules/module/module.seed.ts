@@ -22,7 +22,9 @@ interface SeedModule {
   visible?: boolean;
 }
 
-// Order + icons mirror the previous hardcoded NAV_GROUPS in AppShell.tsx.
+// Every routed page in the frontend's nav, and every slug a route guard (routes/index.ts) checks:
+// a guarded module with no row here 404s on a fresh install. The `category` slug doubles as the
+// Settings → Categories link because `/api/categories` is guarded by that exact slug.
 const SECTIONS: SeedModule[] = [
   { name: "pci", display_name: "PCI", slug: "pci", icon: "MdFolder", menu_order: 1 },
   {
@@ -33,18 +35,25 @@ const SECTIONS: SeedModule[] = [
     menu_order: 2,
   },
   {
+    name: "ip-monitoring",
+    display_name: "IP Monitoring",
+    slug: "ip-monitoring",
+    icon: "MdLan",
+    menu_order: 3,
+  },
+  {
     name: "cron-monitoring",
     display_name: "Cron Monitoring",
     slug: "cron-monitoring",
     icon: "MdSchedule",
-    menu_order: 3,
+    menu_order: 4,
   },
   {
     name: "settings",
     display_name: "Settings",
     slug: "settings",
     icon: "MdSettings",
-    menu_order: 4,
+    menu_order: 5,
   },
 ];
 
@@ -96,6 +105,16 @@ const CHILDREN: SeedModule[] = [
     menu_order: 1,
     parent: "health-monitoring",
   },
+  // IP Monitoring
+  {
+    name: "monitors",
+    display_name: "Monitors",
+    slug: "ip-monitoring-monitors",
+    icon: "MdLan",
+    route: "/ip-monitoring/monitors",
+    menu_order: 1,
+    parent: "ip-monitoring",
+  },
   // Cron Monitoring
   {
     name: "monitors",
@@ -132,6 +151,15 @@ const CHILDREN: SeedModule[] = [
     icon: "MdViewModule",
     route: "/settings/module-management",
     menu_order: 3,
+    parent: "settings",
+  },
+  {
+    name: "categories",
+    display_name: "Categories",
+    slug: "category",
+    icon: "MdLabel",
+    route: "/settings/categories",
+    menu_order: 4,
     parent: "settings",
   },
 ];
