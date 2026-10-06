@@ -45,6 +45,27 @@ function isDaily(t: ScheduledTask): boolean {
   return typeof t.dailyAtMinute === "number";
 }
 
+/** Grace period after boot before an overdue interval task runs, so startup is not slowed. */
+const BOOT_GRACE_MS = 60_000;
+
+/**
+ * When an interval task first runs. Without `lastRunAt`: one interval from startup (avoids a
+ * thundering-herd run at boot). With it: one interval after the last run, but no sooner than the
+ * boot grace — so a task that is already overdue runs about a minute after startup.
+ */
+async function firstDueMs(task: ScheduledTask, now: number): Promise<number> {
+  const intervalMs = (task.intervalSec ?? 0) * 1000;
+  if (!task.lastRunAt) return now + intervalMs;
+  try {
+    const last = await task.lastRunAt();
+    if (!last) return now + BOOT_GRACE_MS;
+    return Math.max(last.getTime() + intervalMs, now + BOOT_GRACE_MS);
+  } catch (err) {
+    logger.error(`[Scheduler] lastRunAt failed for '${task.module}': ${(err as Error)?.message}`);
+    return now + intervalMs;
+  }
+}
+
 let started = false;
 
 export async function startScheduler(): Promise<void> {
@@ -58,14 +79,14 @@ export async function startScheduler(): Promise<void> {
   }
 
   const now = Date.now();
-  const states: TaskState[] = tasks.map((task) => ({
-    task,
-    // Interval tasks: first run one interval from startup (avoids a thundering-herd run at boot).
-    // Daily tasks ignore this field.
-    nextDueMs: isDaily(task) ? 0 : now + (task.intervalSec ?? 0) * 1000,
-    lastFiredDay: "",
-    running: false,
-  }));
+  const states: TaskState[] = await Promise.all(
+    tasks.map(async (task) => ({
+      task,
+      nextDueMs: isDaily(task) ? 0 : await firstDueMs(task, now),
+      lastFiredDay: "",
+      running: false,
+    })),
+  );
 
   // Tick fast enough for the shortest interval task; if there are only daily tasks, fall back to a
   // minute-granular tick so they still fire near their target minute.
@@ -83,7 +104,7 @@ export async function startScheduler(): Promise<void> {
         .map((s) =>
           isDaily(s.task)
             ? `${s.task.module}@daily:${s.task.dailyAtMinute}m`
-            : `${s.task.module}@${s.task.intervalSec}s`,
+            : `${s.task.module}@${s.task.intervalSec}s (next ${new Date(s.nextDueMs).toISOString()})`,
         )
         .join(", "),
   );

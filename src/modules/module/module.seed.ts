@@ -98,7 +98,7 @@ const CHILDREN: SeedModule[] = [
   // Health Monitoring
   {
     name: "monitors",
-    display_name: "Monitors",
+    display_name: "Monitor",
     slug: "health-monitoring-monitors",
     icon: "MdMonitorHeart",
     route: "/health-monitoring/monitors",
@@ -108,7 +108,7 @@ const CHILDREN: SeedModule[] = [
   // IP Monitoring
   {
     name: "monitors",
-    display_name: "Monitors",
+    display_name: "Monitor",
     slug: "ip-monitoring-monitors",
     icon: "MdLan",
     route: "/ip-monitoring/monitors",
@@ -118,7 +118,7 @@ const CHILDREN: SeedModule[] = [
   // Cron Monitoring
   {
     name: "monitors",
-    display_name: "Monitors",
+    display_name: "Monitor",
     slug: "cron-monitoring-monitors",
     icon: "MdSchedule",
     route: "/cron-monitoring/monitors",
@@ -128,7 +128,7 @@ const CHILDREN: SeedModule[] = [
   // Settings
   {
     name: "notifications",
-    display_name: "Notifications",
+    display_name: "Notification",
     slug: "settings-notifications",
     icon: "MdNotifications",
     route: "/settings/notifications",
@@ -137,7 +137,7 @@ const CHILDREN: SeedModule[] = [
   },
   {
     name: "cron-logs",
-    display_name: "Cron Logs",
+    display_name: "Cron Log",
     slug: "settings-cron-logs",
     icon: "MdHistory",
     route: "/settings/cron-logs",
@@ -146,7 +146,7 @@ const CHILDREN: SeedModule[] = [
   },
   {
     name: "module-management",
-    display_name: "Module Management",
+    display_name: "Module",
     slug: "settings-module-management",
     icon: "MdViewModule",
     route: "/settings/module-management",
@@ -155,7 +155,7 @@ const CHILDREN: SeedModule[] = [
   },
   {
     name: "categories",
-    display_name: "Categories",
+    display_name: "Category",
     slug: "category",
     icon: "MdLabel",
     route: "/settings/categories",

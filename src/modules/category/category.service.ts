@@ -2,6 +2,7 @@ import { Like, Not } from "typeorm";
 import { AppDataSource } from "@/config/data-source";
 import { Category } from "@/entities/Category";
 import { HealthMonitor } from "@/entities/HealthMonitor";
+import { Project } from "@/entities/Project";
 import ApiError from "@/utils/ApiError";
 import httpStatus from "@/constants/httpStatus";
 
@@ -16,6 +17,21 @@ import httpStatus from "@/constants/httpStatus";
 
 const repo = () => AppDataSource.getRepository(Category);
 const monitorRepo = () => AppDataSource.getRepository(HealthMonitor);
+const projectRepo = () => AppDataSource.getRepository(Project);
+
+/** `category_id → count` over a table's rows that carry a category. */
+async function countByCategory(
+  repoFn: () => import("typeorm").Repository<{ category_id: number | null }>,
+) {
+  const rows = await repoFn()
+    .createQueryBuilder("t")
+    .select("t.category_id", "category_id")
+    .addSelect("COUNT(*)", "count")
+    .where("t.category_id IS NOT NULL")
+    .groupBy("t.category_id")
+    .getRawMany<{ category_id: number; count: string }>();
+  return new Map(rows.map((r) => [Number(r.category_id), Number(r.count)]));
+}
 
 export interface CategoryPayload {
   name: string;
@@ -55,17 +71,17 @@ export async function listCategories(query: { q?: unknown } = {}) {
     order: { name: "ASC" },
   });
 
-  // One grouped count instead of a query per category.
-  const counts = await monitorRepo()
-    .createQueryBuilder("m")
-    .select("m.category_id", "category_id")
-    .addSelect("COUNT(*)", "count")
-    .where("m.category_id IS NOT NULL")
-    .groupBy("m.category_id")
-    .getRawMany<{ category_id: number; count: string }>();
-  const countMap = new Map(counts.map((r) => [Number(r.category_id), Number(r.count)]));
+  // One grouped count per table instead of a query per category.
+  const [monitors, projects] = await Promise.all([
+    countByCategory(monitorRepo),
+    countByCategory(projectRepo),
+  ]);
 
-  return categories.map((c) => ({ ...c, monitor_count: countMap.get(c.id) ?? 0 }));
+  return categories.map((c) => ({
+    ...c,
+    monitor_count: monitors.get(c.id) ?? 0,
+    project_count: projects.get(c.id) ?? 0,
+  }));
 }
 
 export async function createCategory(body: CategoryPayload) {
@@ -86,8 +102,11 @@ export async function createCategory(body: CategoryPayload) {
 export async function getCategory(id: number) {
   const category = await repo().findOne({ where: { id } });
   if (!category) throw new ApiError(httpStatus.NOT_FOUND, "Category not found.");
-  const monitor_count = await monitorRepo().count({ where: { category_id: id } });
-  return { ...category, monitor_count };
+  const [monitor_count, project_count] = await Promise.all([
+    monitorRepo().count({ where: { category_id: id } }),
+    projectRepo().count({ where: { category_id: id } }),
+  ]);
+  return { ...category, monitor_count, project_count };
 }
 
 export async function updateCategory(id: number, body: CategoryPayload) {
@@ -112,13 +131,20 @@ export async function deleteCategory(id: number) {
   const category = await repo().findOne({ where: { id } });
   if (!category) throw new ApiError(httpStatus.NOT_FOUND, "Category not found.");
 
-  const inUse = await monitorRepo().count({ where: { category_id: id } });
-  if (inUse > 0)
+  const [monitors, projects] = await Promise.all([
+    monitorRepo().count({ where: { category_id: id } }),
+    projectRepo().count({ where: { category_id: id } }),
+  ]);
+  if (monitors + projects > 0) {
+    const parts = [
+      monitors ? `${monitors} monitor${monitors === 1 ? "" : "s"}` : "",
+      projects ? `${projects} PCI project${projects === 1 ? "" : "s"}` : "",
+    ].filter(Boolean);
     throw new ApiError(
       httpStatus.CONFLICT,
-      `This category is assigned to ${inUse} monitor${inUse === 1 ? "" : "s"}. ` +
-        `Reassign ${inUse === 1 ? "it" : "them"} before deleting.`,
+      `This category is assigned to ${parts.join(" and ")}. Reassign them before deleting.`,
     );
+  }
 
   await repo().remove(category);
 }

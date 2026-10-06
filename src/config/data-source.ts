@@ -19,6 +19,8 @@ import { IpHeartbeat } from "@/entities/IpHeartbeat";
 import { CronMonitor } from "@/entities/CronMonitor";
 import { CronRun } from "@/entities/CronRun";
 import { CronDailyResult } from "@/entities/CronDailyResult";
+import { PageScan } from "@/entities/PageScan";
+import { PageFinding } from "@/entities/PageFinding";
 
 /**
  * TypeORM DataSource — replaces the template's mysql2 pool (config/db.js) and Sequelize.
@@ -53,6 +55,8 @@ export const AppDataSource = new DataSource({
     CronMonitor,
     CronRun,
     CronDailyResult,
+    PageScan,
+    PageFinding,
   ],
 });
 

@@ -12,12 +12,19 @@ router.get("/projects/report", validate(schema.reportProjects), pciController.re
 router.get("/projects", validate(schema.listProjects), pciController.listProjects);
 router.post("/projects", validate(schema.createProject), pciController.createProject);
 router.get("/projects/:id/report", validate(schema.reportProject), pciController.reportProject);
+router.post("/projects/:id/scan", validate(schema.scanProject), pciController.scanProject);
+router.get(
+  "/projects/:id/scans",
+  validate(schema.listProjectScans),
+  pciController.listProjectScans,
+);
 router.get("/projects/:id", validate(schema.getProject), pciController.getProject);
 router.put("/projects/:id", validate(schema.updateProject), pciController.updateProject);
 router.delete("/projects/:id", validate(schema.deleteProject), pciController.deleteProject);
 
 // ── Files ──
 router.post("/files/check", validate(schema.checkFile), pciController.checkFile);
+router.get("/files/options", validate(schema.listFileOptions), pciController.listFileOptions);
 router.get("/files", validate(schema.listFiles), pciController.listFiles);
 router.post("/files", validate(schema.createFile), pciController.createFile);
 router.get("/files/:id", validate(schema.getFile), pciController.getFile);
@@ -31,6 +38,9 @@ router.get("/emails/:id", validate(schema.getEmail), pciController.getEmail);
 router.put("/emails/:id", validate(schema.updateEmail), pciController.updateEmail);
 router.delete("/emails/:id", validate(schema.deleteEmail), pciController.deleteEmail);
 
+// ── Payment page scans (all projects) ──
+router.get("/page-scans", validate(schema.listPageScans), pciController.listPageScans);
+
 // ── Check history ──
 router.get("/check-history", validate(schema.listCheckHistory), pciController.listCheckHistory);
 
@@ -39,5 +49,6 @@ router.get("/health", pciController.health);
 
 // ── Manual run from the dashboard (session-authenticated via authGate) ──
 router.post("/run", pciController.runManual);
+router.get("/run/status", pciController.runStatus);
 
 export default router;

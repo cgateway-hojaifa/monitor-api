@@ -6,6 +6,8 @@ import {
   UpdateDateColumn,
 } from "typeorm";
 
+export type FileStatus = "valid" | "invalid" | "error" | "unchecked";
+
 @Entity({ name: "files" })
 export class FileRecord {
   @PrimaryGeneratedColumn({ type: "int", unsigned: true })
@@ -26,8 +28,12 @@ export class FileRecord {
   @Column({ type: "datetime", nullable: true, default: null })
   last_check!: Date | null;
 
-  @Column({ type: "enum", enum: ["valid", "invalid", "unchecked"], default: "unchecked" })
-  current_status!: "valid" | "invalid" | "unchecked";
+  /**
+   * valid / invalid = the live file matched / differed from the baseline. `error` = the last check
+   * could not fetch the file (host down, 404, timeout…) — not evidence of tampering.
+   */
+  @Column({ type: "enum", enum: ["valid", "invalid", "error", "unchecked"], default: "unchecked" })
+  current_status!: FileStatus;
 
   @CreateDateColumn({ type: "datetime", name: "created_at" })
   created_at!: Date;

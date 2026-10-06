@@ -36,6 +36,12 @@ export interface ScheduledTask {
   dailyAtMinute?: number;
   /** The work. Should resolve when the run is complete. */
   run: () => Promise<void>;
+  /**
+   * Interval tasks only, optional: when this task last ran (any trigger), read at boot. With it the
+   * first run is due `intervalSec` after that time — at once if already overdue — instead of a full
+   * interval after every boot, so frequent restarts can no longer postpone the task indefinitely.
+   */
+  lastRunAt?: () => Promise<Date | null>;
 }
 
 export interface ModuleManifest {

@@ -6,7 +6,19 @@
  * Schema is owned by TypeORM (synchronize), so no per-module model sync.
  */
 import type { ModuleManifest } from "@/shared/registry";
-import { runAllFileChecks } from "@/modules/pci/services/checkRunner";
+import { runScheduledBatch } from "@/modules/pci/services/batch";
+import { AppDataSource } from "@/config/data-source";
+import { CronLog } from "@/entities/CronLog";
+
+/** Start time of the last finished PCI batch (scheduled or manual), from the cron log. */
+async function lastPciRun(): Promise<Date | null> {
+  const row = await AppDataSource.getRepository(CronLog)
+    .createQueryBuilder("l")
+    .select("MAX(l.started_at)", "last")
+    .where("l.module = :m AND l.status <> :running", { m: "pci", running: "running" })
+    .getRawOne<{ last: Date | null }>();
+  return row?.last ? new Date(row.last) : null;
+}
 
 // Cron interval configured via .env (PCI_INTERVAL_SEC, in seconds). If it is unset or not a
 // positive number, the PCI file-check cron is disabled — no task is registered, so it never runs.
@@ -22,8 +34,10 @@ export const pciModule: ModuleManifest = {
           module: "pci",
           intervalSec: INTERVAL_SEC,
           run: async () => {
-            await runAllFileChecks();
+            await runScheduledBatch();
           },
+          // Keep the 8-hourly rhythm across restarts instead of restarting the clock at each boot.
+          lastRunAt: lastPciRun,
         },
       ]
     : [],

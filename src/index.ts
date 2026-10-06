@@ -2,7 +2,7 @@ import "reflect-metadata";
 import app from "@/app";
 import config from "@/config/config";
 import logger from "@/config/logger";
-import { initDataSource } from "@/config/data-source";
+import { initDataSource, AppDataSource } from "@/config/data-source";
 import { backfillNotificationModules } from "@/notifications/store";
 // Seeding disabled — the DB is the source of truth for modules; boot must never write to the table.
 // import { seedModules } from "@/modules/module/module.seed";
@@ -51,7 +51,34 @@ const exitHandler = () => {
 process.on("uncaughtException", exitHandler);
 process.on("unhandledRejection", exitHandler);
 
-process.on("SIGTERM", () => {
-  logger.info("SIGTERM received");
-  if (server) server.close();
-});
+/**
+ * Graceful stop on SIGTERM (ts-node-dev restart, `pm2 restart`) and SIGINT (Ctrl+C).
+ *
+ * Installing a SIGTERM listener disables Node's default exit, so this must end the process itself:
+ * the scheduler's interval, the DB pool and keep-alive sockets would otherwise keep it running —
+ * which left ts-node-dev waiting forever for the old process and nothing listening on the port.
+ */
+const SHUTDOWN_TIMEOUT_MS = 5_000;
+let shuttingDown = false;
+
+const shutdown = (signal: string) => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  logger.info(`${signal} received — shutting down`);
+
+  // Never hang: force the exit if a socket or query refuses to finish.
+  setTimeout(() => process.exit(0), SHUTDOWN_TIMEOUT_MS).unref();
+
+  const finish = () =>
+    AppDataSource.destroy()
+      .catch(() => {})
+      .finally(() => process.exit(0));
+
+  if (!server) return void finish();
+  server.close(() => void finish());
+  // Idle keep-alive connections (e.g. a browser polling) would otherwise hold `close` open.
+  server.closeIdleConnections();
+};
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));

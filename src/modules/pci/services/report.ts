@@ -1,9 +1,13 @@
+import { In } from "typeorm";
 import { AppDataSource } from "@/config/data-source";
 import { Project } from "@/entities/Project";
 import { FileRecord } from "@/entities/FileRecord";
 import { CheckHistory } from "@/entities/CheckHistory";
-import chromium from "@sparticuz/chromium";
-import puppeteer from "puppeteer-core";
+import { PageScan } from "@/entities/PageScan";
+import { PageFinding } from "@/entities/PageFinding";
+import { parseExpectedHeaders } from "@/entities/Project";
+import type { FileStatus } from "@/entities/FileRecord";
+import { launchBrowser } from "@/modules/pci/services/browser";
 
 /**
  * PCI report generation — single-project and all-projects reports, each renderable as PDF
@@ -15,6 +19,8 @@ import puppeteer from "puppeteer-core";
 const projectRepo = () => AppDataSource.getRepository(Project);
 const fileRepo = () => AppDataSource.getRepository(FileRecord);
 const historyRepo = () => AppDataSource.getRepository(CheckHistory);
+const scanRepo = () => AppDataSource.getRepository(PageScan);
+const findingRepo = () => AppDataSource.getRepository(PageFinding);
 
 export interface ReportOutput {
   contentType: string;
@@ -46,17 +52,16 @@ async function htmlToPdf(
   html: string,
   margin: { top: string; bottom: string; left: string; right: string },
 ): Promise<Buffer> {
-  const browser = await puppeteer.launch({
-    args: chromium.args,
-    defaultViewport: { width: 1280, height: 800 },
-    executablePath: await chromium.executablePath(),
-    headless: true,
-  });
-  const page = await browser.newPage();
-  await page.setContent(html, { waitUntil: "networkidle0" as never });
-  const pdfBuffer = await page.pdf({ format: "A4", printBackground: true, margin });
-  await browser.close();
-  return Buffer.from(pdfBuffer);
+  const browser = await launchBrowser();
+  try {
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: "networkidle0" as never });
+    const pdfBuffer = await page.pdf({ format: "A4", printBackground: true, margin });
+    return Buffer.from(pdfBuffer);
+  } finally {
+    // Always close, or a failed render leaves a Chromium process running.
+    await browser.close().catch(() => {});
+  }
 }
 
 // ─── Single-project report ──────────────────────────────────────────────────
@@ -66,7 +71,29 @@ interface FileRow {
   file_name: string;
   file_url: string;
   last_check: string | null;
-  current_status: "valid" | "invalid" | "unchecked";
+  current_status: FileStatus;
+}
+
+interface ScanFindingRow {
+  type: string;
+  subject: string;
+}
+
+interface ScanRow {
+  scan_time: string;
+  result: string;
+  findings_count: number;
+  error_message: string | null;
+  findings: ScanFindingRow[];
+}
+
+/** PCI DSS 11.6.1 evidence for a project with a monitored payment page. */
+interface PageMonitoring {
+  page_url: string;
+  scan_status: string;
+  last_scan: string | null;
+  expectedHeaders: Array<{ name: string; value: string }>;
+  scans: ScanRow[];
 }
 
 interface ProjectType {
@@ -74,6 +101,7 @@ interface ProjectType {
   name: string;
   description: string | null;
   files: FileRow[];
+  monitoring: PageMonitoring | null;
 }
 
 function buildCSV(project: ProjectType): string {
@@ -88,6 +116,181 @@ function buildCSV(project: ProjectType): string {
   return [header.join(","), ...rows.map((r) => r.join(","))].join("\r\n");
 }
 
+// ─── PCI DSS 11.6.1 evidence section ──────────────────────────────────────────
+
+const FINDING_LABEL: Record<string, string> = {
+  HEADER_REMOVED: "Header missing",
+  HEADER_CHANGED: "Header value changed",
+};
+
+function fmtDateTime(d: string | null) {
+  if (!d) return "—";
+  return new Date(d).toLocaleString("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+/** The PCI check cadence as configured (PCI_INTERVAL_SEC), for the evidence text. */
+function checkFrequency(): string {
+  const sec = Number(process.env.PCI_INTERVAL_SEC);
+  if (!(sec > 0)) return "manual checks only (no schedule configured)";
+  const hours = sec / 3600;
+  return Number.isInteger(hours)
+    ? `every ${hours} hour${hours === 1 ? "" : "s"}`
+    : `every ${sec} seconds`;
+}
+
+function buildMonitoringHTML(project: ProjectType): string {
+  const m = project.monitoring;
+  if (!m) return "";
+
+  const headerRows =
+    m.expectedHeaders.length === 0
+      ? `<tr><td colspan="2" class="empty">No HTTP headers are configured for checking on this project.</td></tr>`
+      : m.expectedHeaders
+          .map(
+            (h) => `
+        <tr>
+          <td class="mono" style="width:230px;">${escapeHtml(h.name)}</td>
+          <td class="url">${escapeHtml(h.value)}</td>
+        </tr>`,
+          )
+          .join("");
+
+  const scanRows =
+    m.scans.length === 0
+      ? `<tr><td colspan="4" class="empty">No scans recorded yet.</td></tr>`
+      : m.scans
+          .map((s) => {
+            const style =
+              s.result === "clean"
+                ? "color:#15803d;background:#f0fdf4;border:1px solid #86efac;"
+                : s.result === "failed"
+                  ? "color:#b91c1c;background:#fef2f2;border:1px solid #fca5a5;"
+                  : "color:#b45309;background:#fffbeb;border:1px solid #fcd34d;";
+            const label =
+              s.result === "clean" ? "✔ Clean" : s.result === "failed" ? "✖ Failed" : "! Error";
+            return `
+        <tr>
+          <td class="muted">${fmtDateTime(s.scan_time)}</td>
+          <td class="center"><span class="badge" style="${style}">${label}</span></td>
+          <td class="center muted">${s.result === "error" ? "—" : String(m.expectedHeaders.length)}</td>
+          <td class="center muted">${s.result === "error" ? escapeHtml(s.error_message || "Error") : String(s.findings_count)}</td>
+        </tr>`;
+          })
+          .join("");
+
+  const allFindings = m.scans.flatMap((s) =>
+    s.findings.map((f) => ({ scan_time: s.scan_time, ...f })),
+  );
+  const findingRows =
+    allFindings.length === 0
+      ? `<tr><td colspan="3" class="empty">No change or tamper findings recorded.</td></tr>`
+      : allFindings
+          .map(
+            (f) => `
+        <tr>
+          <td class="muted" style="width:120px;">${fmtDateTime(f.scan_time)}</td>
+          <td>${escapeHtml(FINDING_LABEL[f.type] || f.type)}</td>
+          <td class="url">${escapeHtml(f.subject)}</td>
+        </tr>`,
+          )
+          .join("");
+
+  const frequency = checkFrequency();
+
+  return `
+<div style="page-break-before:always;"></div>
+
+<div style="margin:0 0 14px;">
+  <div style="font-size:11px;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:0.08em;">PCI DSS Requirement 11.6.1</div>
+  <div style="font-size:17px;font-weight:700;color:#111827;margin-top:2px;">Payment Page Change &amp; Tamper Detection</div>
+  <p style="font-size:12px;color:#6b7280;margin-top:6px;line-height:1.5;">
+    The monitored payment page is loaded in a browser engine so that the HTTP response headers
+    are evaluated exactly as received by the consumer browser. The headers listed below are
+    compared against their expected values on every check. The mechanism runs automatically
+    ${frequency}. Detected changes generate an alert to designated personnel and are recorded
+    in the check history below.
+  </p>
+</div>
+
+<table style="margin-bottom:18px;">
+  <thead><tr><th colspan="2">Monitoring Configuration</th></tr></thead>
+  <tbody>
+    <tr><td class="mono" style="width:230px;">Monitored page URL</td><td class="url">${escapeHtml(m.page_url)}</td></tr>
+    <tr><td class="mono">Last checked</td><td class="muted">${fmtDateTime(m.last_scan)}</td></tr>
+    <tr><td class="mono">Current status</td><td class="muted">${escapeHtml(m.scan_status)}</td></tr>
+    <tr><td class="mono">Check frequency</td><td class="muted">${frequency}</td></tr>
+  </tbody>
+</table>
+
+<table style="margin-bottom:18px;">
+  <thead><tr><th>Checked HTTP Header</th><th>Expected Value</th></tr></thead>
+  <tbody>${headerRows}</tbody>
+</table>
+
+<table style="margin-bottom:18px;">
+  <thead>
+    <tr>
+      <th>Scan Time</th>
+      <th class="center" style="width:90px;">Result</th>
+      <th class="center" style="width:110px;">Headers Checked</th>
+      <th class="center" style="width:80px;">Findings</th>
+    </tr>
+  </thead>
+  <tbody>${scanRows}</tbody>
+</table>
+
+<table>
+  <thead><tr><th>Detected At</th><th>Finding</th><th>Subject</th></tr></thead>
+  <tbody>${findingRows}</tbody>
+</table>
+`;
+}
+
+/** The last 30 scans of a monitored project + their findings, or null when no page is set. */
+async function loadMonitoring(project: {
+  id: number;
+  page_url: string | null;
+  scan_status: string;
+  last_scan: Date | null;
+  expected_headers: string | null;
+}): Promise<PageMonitoring | null> {
+  if (!project.page_url) return null;
+  const scans = await scanRepo().find({
+    where: { project_id: project.id },
+    order: { scan_time: "DESC" },
+    take: 30,
+  });
+  const findings = scans.length
+    ? await findingRepo().find({
+        where: { scan_id: In(scans.map((s) => s.id)) },
+        order: { id: "ASC" },
+      })
+    : [];
+  const byScan = new Map<number, ScanFindingRow[]>();
+  for (const f of findings)
+    byScan.set(f.scan_id, [...(byScan.get(f.scan_id) ?? []), { type: f.type, subject: f.subject }]);
+
+  return {
+    page_url: project.page_url,
+    scan_status: project.scan_status,
+    last_scan: project.last_scan ? new Date(project.last_scan).toISOString() : null,
+    expectedHeaders: parseExpectedHeaders(project.expected_headers),
+    scans: scans.map((s) => ({
+      scan_time: new Date(s.scan_time).toISOString(),
+      result: s.result,
+      findings_count: s.findings_count,
+      error_message: s.error_message,
+      findings: byScan.get(s.id) ?? [],
+    })),
+  };
+}
+
 function buildReportHTML(project: ProjectType): string {
   const counts = {
     total: project.files.length,
@@ -99,11 +302,18 @@ function buildReportHTML(project: ProjectType): string {
   const statusStyle = (s: string) => {
     if (s === "valid") return "color:#15803d;background:#f0fdf4;border:1px solid #86efac;";
     if (s === "invalid") return "color:#b91c1c;background:#fef2f2;border:1px solid #fca5a5;";
+    if (s === "error") return "color:#b45309;background:#fffbeb;border:1px solid #fcd34d;";
     return "color:#6b7280;background:#f9fafb;border:1px solid #e5e7eb;";
   };
 
   const statusLabel = (s: string) =>
-    s === "valid" ? "✔ Valid" : s === "invalid" ? "✖ Invalid" : "? Unchecked";
+    s === "valid"
+      ? "✔ Valid"
+      : s === "invalid"
+        ? "✖ Invalid"
+        : s === "error"
+          ? "! Error"
+          : "? Unchecked";
 
   const rows = project.files
     .map(
@@ -298,6 +508,8 @@ function buildReportHTML(project: ProjectType): string {
   <tbody>${rows || emptyRow}</tbody>
 </table>
 
+${buildMonitoringHTML(project)}
+
 <div class="footer">
   <span>Generated: ${new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}</span>
   <span>${counts.total} files total</span>
@@ -330,6 +542,7 @@ export async function reportOne(projectId: number, format: string): Promise<Repo
     name: projectRecord.name,
     description: projectRecord.description ?? null,
     files,
+    monitoring: await loadMonitoring(projectRecord),
   };
 
   const safeName = project.name.replace(/[^a-zA-Z0-9_-]/g, "_");
@@ -459,10 +672,17 @@ function buildAllProjectsHTML(projects: ProjectWithFiles[], generatedAt: Date): 
   const statusStyle = (s: string) => {
     if (s === "valid") return "color:#15803d;background:#f0fdf4;border:1px solid #86efac;";
     if (s === "invalid") return "color:#b91c1c;background:#fef2f2;border:1px solid #fca5a5;";
+    if (s === "error") return "color:#b45309;background:#fffbeb;border:1px solid #fcd34d;";
     return "color:#6b7280;background:#f9fafb;border:1px solid #e5e7eb;";
   };
   const statusLabel = (s: string) =>
-    s === "valid" ? "✔ Valid" : s === "invalid" ? "✖ Invalid" : "? Unchecked";
+    s === "valid"
+      ? "✔ Valid"
+      : s === "invalid"
+        ? "✖ Invalid"
+        : s === "error"
+          ? "! Error"
+          : "? Unchecked";
 
   const summaryRows = projects
     .map((p) => {
@@ -790,40 +1010,52 @@ ${projectPages}
 export async function reportAll(format: string): Promise<ReportOutput> {
   const projects = await projectRepo().find({ order: { name: "ASC" } });
 
-  const projectsWithFiles: ProjectWithFiles[] = await Promise.all(
-    projects.map(async (project) => {
-      const files = await fileRepo().find({
-        where: { project_id: project.id },
-        order: { file_name: "ASC" },
-      });
+  // Three queries total (projects, files, each file's latest history row) instead of one per file.
+  const files = await fileRepo().find({
+    select: ["id", "project_id", "file_name", "file_url", "last_check", "current_status"],
+    order: { file_name: "ASC" },
+  });
+  const latest: Array<{ file_id: number; check_time: Date; file_status: string }> =
+    files.length === 0
+      ? []
+      : await historyRepo()
+          .createQueryBuilder("h")
+          .select([
+            "h.file_id AS file_id",
+            "h.check_time AS check_time",
+            "h.file_status AS file_status",
+          ])
+          .innerJoin(
+            (qb) =>
+              qb
+                .select("x.file_id", "fid")
+                .addSelect("MAX(x.check_time)", "mt")
+                .from(CheckHistory, "x")
+                .groupBy("x.file_id"),
+            "last",
+            "last.fid = h.file_id AND last.mt = h.check_time",
+          )
+          .getRawMany();
+  const lastByFile = new Map(latest.map((h) => [Number(h.file_id), h]));
 
-      const filesWithHistory: FileWithHistory[] = await Promise.all(
-        files.map(async (f) => {
-          const last = await historyRepo().findOne({
-            where: { file_id: f.id },
-            order: { check_time: "DESC" },
-          });
-          return {
-            id: f.id,
-            file_name: f.file_name,
-            file_url: f.file_url,
-            last_check: f.last_check,
-            current_status: f.current_status,
-            lastHistory: last
-              ? { check_time: last.check_time, file_status: last.file_status }
-              : null,
-          };
-        }),
-      );
-
-      return {
-        id: project.id,
-        name: project.name,
-        description: project.description,
-        files: filesWithHistory,
-      };
-    }),
-  );
+  const projectsWithFiles: ProjectWithFiles[] = projects.map((project) => ({
+    id: project.id,
+    name: project.name,
+    description: project.description,
+    files: files
+      .filter((f) => f.project_id === project.id)
+      .map((f): FileWithHistory => {
+        const last = lastByFile.get(f.id);
+        return {
+          id: f.id,
+          file_name: f.file_name,
+          file_url: f.file_url,
+          last_check: f.last_check,
+          current_status: f.current_status,
+          lastHistory: last ? { check_time: last.check_time, file_status: last.file_status } : null,
+        };
+      }),
+  }));
 
   const generatedAt = new Date();
   const timestamp = generatedAt.toISOString().slice(0, 10);

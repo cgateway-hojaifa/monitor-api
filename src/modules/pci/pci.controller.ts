@@ -4,11 +4,11 @@ import catchAsync from "@/middleware/catchAsync";
 import ApiError from "@/utils/ApiError";
 import * as service from "@/modules/pci/pci.service";
 import { reportOne, reportAll } from "@/modules/pci/services/report";
-import { runWithLog } from "@/shared/cron";
+import { startManualBatch, batchStatus, BatchBusyError } from "@/modules/pci/services/batch";
 
 // ── Projects ──
-export const listProjects = catchAsync(async (_req: Request, res: Response) => {
-  const data = await service.listProjects();
+export const listProjects = catchAsync(async (req: Request, res: Response) => {
+  const data = await service.listProjects(req.query.category_id);
   res.status(httpStatus.OK).json({ success: true, data });
 });
 
@@ -32,10 +32,31 @@ export const deleteProject = catchAsync(async (req: Request, res: Response) => {
   res.status(httpStatus.OK).json({ success: true, message: "Project deleted." });
 });
 
+// ── Payment page scans (PCI DSS 11.6.1) ──
+export const scanProject = catchAsync(async (req: Request, res: Response) => {
+  const data = await service.scanProject(Number(req.params.id));
+  res.status(httpStatus.OK).json({ success: true, data });
+});
+
+export const listProjectScans = catchAsync(async (req: Request, res: Response) => {
+  const result = await service.listProjectScans(Number(req.params.id), req.query);
+  res.status(httpStatus.OK).json({ success: true, ...result });
+});
+
+export const listPageScans = catchAsync(async (req: Request, res: Response) => {
+  const result = await service.listPageScans(req.query);
+  res.status(httpStatus.OK).json({ success: true, ...result });
+});
+
 // ── Files ──
+export const listFileOptions = catchAsync(async (req: Request, res: Response) => {
+  const data = await service.listFileOptions(req.query.project_id);
+  res.status(httpStatus.OK).json({ success: true, data });
+});
+
 export const listFiles = catchAsync(async (req: Request, res: Response) => {
-  const projectId = typeof req.query.project_id === "string" ? req.query.project_id : undefined;
-  const data = await service.listFiles(projectId);
+  // `validate` has already coerced project_id to a number (it is not a string here).
+  const data = await service.listFiles(req.query.project_id);
   res.status(httpStatus.OK).json({ success: true, data });
 });
 
@@ -93,9 +114,8 @@ export const deleteEmail = catchAsync(async (req: Request, res: Response) => {
 
 // ── Check history ──
 export const listCheckHistory = catchAsync(async (req: Request, res: Response) => {
-  const fileId = typeof req.query.file_id === "string" ? req.query.file_id : undefined;
-  const data = await service.listCheckHistory(fileId, req.query.limit);
-  res.status(httpStatus.OK).json({ success: true, data });
+  const result = await service.listCheckHistory(req.query);
+  res.status(httpStatus.OK).json({ success: true, ...result });
 });
 
 // ── Reports ──
@@ -120,13 +140,23 @@ export const reportProjects = catchAsync(async (req: Request, res: Response) => 
 
 // ── Health ──
 export const health = catchAsync(async (_req: Request, res: Response) => {
-  res.status(httpStatus.OK).json({ success: true, message: "DB connected and synced." });
+  await service.health();
+  res.status(httpStatus.OK).json({ success: true, message: "Database reachable." });
 });
 
-// ── Manual run (session-authenticated; behind authGate's default session-token branch) ──
-// The dashboard "Run" button triggers this. Auth is the logged-in user's session cookie — the PCI
-// file-check batch is the same one the in-process scheduler runs every PCI_INTERVAL_SEC.
+// ── Manual run (session-authenticated; the dashboard / Check History "Run" button) ──
+// Starts the PCI batch in the background and answers 202 at once; the UI polls GET /run/status.
+// One batch at a time: 409 while a run (manual or scheduled) is in progress.
 export const runManual = catchAsync(async (_req: Request, res: Response) => {
-  const batch = await runWithLog("pci", "manual", service.runAllFileChecks);
-  res.status(httpStatus.OK).json({ success: true, timestamp: new Date().toISOString(), ...batch });
+  try {
+    const status = startManualBatch();
+    res.status(httpStatus.ACCEPTED).json({ success: true, ...status });
+  } catch (err) {
+    if (err instanceof BatchBusyError) throw new ApiError(httpStatus.CONFLICT, err.message);
+    throw err;
+  }
+});
+
+export const runStatus = catchAsync(async (_req: Request, res: Response) => {
+  res.status(httpStatus.OK).json({ success: true, ...batchStatus() });
 });
